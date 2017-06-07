@@ -1,0 +1,60 @@
+{
+  "query": {
+    "bool": {
+      "must": [
+        {
+          "dis_max": {
+            "queries": [
+              {
+                "terms": {
+                  "text.term.en": [
+                    "sepeda"
+                  ]
+                }
+              },
+              {
+                "terms": {
+                  "text.term.id": [
+                    "sepeda"
+                  ]
+                }
+              },
+              {
+                "terms": {
+                  "text.term.nl": [
+                    "sepeda"
+                  ]
+                }
+              },
+              {
+                "terms": {
+                  "text.shingle.en": [
+                    "sepeda"
+                  ]
+                }
+              },
+              {
+                "terms": {
+                  "text.shingle.id": [
+                    "sepeda"
+                  ]
+                }
+              },
+              {
+                "terms": {
+                  "text.shingle.nl": [
+                    "sepeda"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "should": [],
+      "filter": [],
+      "minimum_should_match": 1,
+      "boost": 1
+    }
+  }
+}

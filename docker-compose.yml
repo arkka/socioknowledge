@@ -1,0 +1,84 @@
+version: '2'
+volumes:
+  spark-master-data
+  spark-worker-data
+  notebooks
+  spark-master-conf
+  spark-worker-conf
+services:
+  spark-notebook:
+    image: arkka/spark-notebook
+    environment:
+      AWS_ACCESS_KEY_ID: AKIAJIZUY33KIRTBN7SA
+      AWS_SECRET_ACCESS_KEY: 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
+      SE_ENV: production
+      SE_BUCKET_URL: s3n://socioknowledge/
+    volumes:
+    - notebooks:/home/jovyan/work
+    tty: true
+    links:
+    - spark-master:spark-master
+    ports:
+    - 8888:8888/tcp
+    command:
+    - start-notebook.sh
+    - --NotebookApp.password=sha1:a4971f72161e:f8d9f232fe3a25acf2970a59274f2947314d076f
+    labels:
+      io.rancher.container.pull_image: always
+      io.rancher.scheduler.affinity:host_label: spark-notebook=true
+  spark-ui-proxy:
+    image: ursuad/spark-ui-proxy
+    stdin_open: true
+    tty: true
+    links:
+    - spark-master:spark-master
+    ports:
+    - 9999:9999/tcp
+    command:
+    - spark-master:8080
+    - '9999'
+  spark-master:
+    image: arkka/spark
+    hostname: spark-master
+    environment:
+      MASTER: spark://spark-master:7077
+      SPARK_CONF_DIR: /conf
+    volumes:
+    - spark-master-conf:/conf
+    - spark-master-data:/tmp/data
+    expose:
+    - '7001'
+    - '7002'
+    - '7003'
+    - '7004'
+    - '7005'
+    - '7006'
+    - '7077'
+    - '6066'
+    command:
+    - bin/spark-class
+    - org.apache.spark.deploy.master.Master
+    - -h
+    - spark-master
+  spark-worker:
+    image: arkka/spark
+    hostname: spark-worker
+    environment:
+      SPARK_CONF_DIR: /conf
+      SPARK_WORKER_PORT: '8881'
+      SPARK_WORKER_WEBUI_PORT: '8080'
+    volumes:
+    - spark-worker-conf:/conf
+    - spark-worker-data:/tmp/data
+    expose:
+    - '7012'
+    - '7013'
+    - '7014'
+    - '7015'
+    - '7016'
+    - '8081'
+    - '8881'
+    command:
+    - bin/spark-class
+    - org.apache.spark.deploy.worker.Worker
+    - spark://spark-master:7077
