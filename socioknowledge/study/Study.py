@@ -30,9 +30,6 @@ class Study(object):
         if os.environ.get('SPARK_MASTER') is not None:
             spark_master = os.environ.get('SPARK_MASTER')
 
-        if os.environ.get('SPARK_MASTER') is not None:
-            spark_master = os.environ.get('SPARK_MASTER')
-
         spark_conf = SparkConf()
         spark_conf.setAppName(spark_app)
         spark_conf.setMaster(spark_master)

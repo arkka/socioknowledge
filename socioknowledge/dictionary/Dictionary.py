@@ -1,5 +1,6 @@
 import json
-
+import logging
+from pyspark import StorageLevel
 from pyspark.sql.functions import col, udf, lit, array, struct, create_map
 from pyspark.sql.types import ArrayType, StructType, StructField, DoubleType, IntegerType, LongType, StringType, DateType, DataType
 from pyspark.ml.feature import HashingTF, IDF, Tokenizer, StopWordsRemover
@@ -62,7 +63,7 @@ class Dictionary(object):
         id = self.study.sqlc.read.csv(self.study.bucket_dataset_url + "stopwords/stopwords-id.csv", header=False, schema=schema)
         nl = self.study.sqlc.read.csv(self.study.bucket_dataset_url + "stopwords/stopwords-nl.csv", header=False, schema=schema)
         stopwords = en.unionAll(id).unionAll(nl)
-        self.stopwords = stopwords.rdd.map(lambda row: row.asDict()['term']).collect()
+        self.stopwords = stopwords.rdd.map(lambda row: row.asDict()['term']).cache()
         return self
 
     def get(self):
@@ -112,7 +113,7 @@ class Dictionary(object):
         # load default stop words
         if stopwords is None:
             self.load_stopwords()
-            stopwords = self.stopwords
+            stopwords = self.stopwords.collect()
 
         join_words = udf(lambda words: " ".join(words), StringType())
         remover = StopWordsRemover(inputCol="term_tokens", outputCol="term_tokens_filtered", stopWords=stopwords)
@@ -178,6 +179,7 @@ class Dictionary(object):
             .map(lambda row: (row['class'], [row['term_tokenized']])) \
             .reduceByKey(lambda x, y: x + y) \
             .map(lambda (x, y): {'class': x, 'terms': list(set(y))})
+            
         df = self.study.sqlc.createDataFrame(rdd, self.compiled_schema)
         self.compiled = df
 
