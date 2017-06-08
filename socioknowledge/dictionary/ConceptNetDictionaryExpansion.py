@@ -1,6 +1,7 @@
 from DictionaryExpansion import DictionaryExpansion
 
 import json
+from pyspark import StorageLevel
 from pyspark.sql.types import ArrayType, StructType, StructField, DoubleType, IntegerType, LongType, StringType, DateType, DataType
 
 
@@ -279,19 +280,29 @@ class ConceptNetDictionaryExpansion(DictionaryExpansion):
             else:
                 seed['term_expanded_conceptnet_num'] = 0
             return seed
-
-        dictionary_rdd = seed.rdd.map(lambda row: row.asDict())
-        seed_rdd = dictionary_rdd
-
-        dictionary_rdd = dictionary_rdd.map(lambda dictionary: preprocess_dictionary(dictionary, input_col))
-        seed_rdd = seed_rdd.flatMap(generate_dictionary_senses).map(lambda dictionary: preprocess_dictionary(dictionary, input_col))
-
-        concept_rdd = concepts.rdd.map(lambda row: row.asDict()).map(preprocess_concept)
-        seed_concept_rdd = seed_rdd.leftOuterJoin(concept_rdd)
-
-        related_dictionary_rdd = seed_concept_rdd.map(lambda (k, v): extract_dictionary(v)).filter(lambda x: x is not None)
-        related_dictionary_num_rdd = related_dictionary_rdd.groupBy(lambda x: x['term_expanded_conceptnet_from'])
-        expanded_dictionary_rdd = dictionary_rdd.leftOuterJoin(related_dictionary_num_rdd).map(lambda (k, (v, z)): extract_expanded_stats(v, z))
+        
+        # seed dictionary 
+        seed_rdd = seed.rdd.map(lambda row: row.asDict())
+        dictionary_rdd = seed_rdd
+        
+        # pre-process seed dictionary
+        seed_rdd = seed_rdd.flatMap(generate_dictionary_senses).map(lambda dictionary: preprocess_dictionary(dictionary, input_col)).persist(StorageLevel.MEMORY_AND_DISK)
+        
+        # pre-process dictionary
+        dictionary_rdd = dictionary_rdd.map(lambda dictionary: preprocess_dictionary(dictionary, input_col)).persist(StorageLevel.MEMORY_AND_DISK)
+        
+        # pre process concept
+        concept_rdd = concepts.rdd.map(lambda row: row.asDict()).map(preprocess_concept).persist(StorageLevel.MEMORY_AND_DISK)
+        
+        related_dictionary_rdd = seed_rdd \
+            .leftOuterJoin(concept_rdd) \
+            .map(lambda (k, v): extract_dictionary(v)) \
+            .filter(lambda x: x is not None) \
+            .groupBy(lambda x: x['term_expanded_conceptnet_from'])
+            
+        expanded_dictionary_rdd = dictionary_rdd \
+            .leftOuterJoin(related_dictionary_rdd) \
+            .map(lambda (k, (v, z)): extract_expanded_stats(v, z))
 
         expanded_dictionary = self.study.sqlc.createDataFrame(expanded_dictionary_rdd, self.schema)
         related_dictionary = self.study.sqlc.createDataFrame(related_dictionary_rdd, self.schema)
@@ -305,8 +316,5 @@ class ConceptNetDictionaryExpansion(DictionaryExpansion):
         self.tokenize(input_col="term_tokenized")
         expanded_dictionary = self.dictionary
 
-        # print related_dictionary
-        # print expanded_dictionary
-
-        self.dictionary = expanded_dictionary.unionAll(related_dictionary)
+        self.dictionary = expanded_dictionary.unionAll(related_dictionary).persist(StorageLevel.MEMORY_AND_DISK)
         return self

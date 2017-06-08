@@ -49,11 +49,9 @@ class Dictionary(object):
             file_name = self.dictionary_name + "-seeds.csv"
             print "No file name specified to load dictionary. Using default file: " + self.study.bucket_study_url + file_name
 
-        df = self.study.sqlc.read.csv(
+        self.dictionary = self.study.sqlc.read.csv(
             self.study.bucket_study_url + file_name, header=True, mode="PERMISSIVE", schema=self.schema
-        )
-
-        self.dictionary = df
+        ).persist(StorageLevel.MEMORY_AND_DISK)
         return self
 
 
@@ -172,17 +170,15 @@ class Dictionary(object):
         self.dictionary = df
         return self
 
-    def compile(self, max_words_num=2):
+    def compile(self, max_tokens_num=2):
         rdd = self.dictionary.rdd \
             .map(lambda row: row.asDict()) \
-            .filter(lambda row: row['term_tokenized_length'] > 0 and row['term_tokens_num'] <= max_words_num) \
+            .filter(lambda row: row['term_tokenized_length'] > 0 and row['term_tokens_num'] <= max_tokens_num) \
             .map(lambda row: (row['class'], [row['term_tokenized']])) \
             .reduceByKey(lambda x, y: x + y) \
             .map(lambda (x, y): {'class': x, 'terms': list(set(y))})
             
-        df = self.study.sqlc.createDataFrame(rdd, self.compiled_schema)
-        self.compiled = df
-
+        self.compiled = self.study.sqlc.createDataFrame(rdd, self.compiled_schema).persist(StorageLevel.MEMORY_AND_DISK)
         return self
 
     def export_csv(self, file_name=None, repartition=True):

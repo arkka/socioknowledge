@@ -322,10 +322,10 @@ class Stream(object):
         label_match_udf = udf(label_match, ArrayType(StringType()))
         label_unmatch_udf = udf(label_unmatch, ArrayType(StringType()))
 
-        stream_df = self.stream
-        dictionary_df = dictionary.compiled
-        dictionary_data = dictionary_df.rdd.map(lambda row: row.asDict()).collect()
-        for d in dictionary_data:
+        stream_df = self.stream.persist(StorageLevel.MEMORY_AND_DISK)
+        dictionary_df = dictionary.compiled.rdd.map(lambda row: row.asDict()).persist(StorageLevel.MEMORY_AND_DISK)
+
+        for d in dictionary_df.collect():
             terms = array([lit(term) for term in d['terms']])
             stream_df = stream_df.withColumn('dictionary_' + d['class'], terms)
 
@@ -357,7 +357,7 @@ class Stream(object):
 
         stream_df = stream_df.withColumn('dictionary_classes', label_unmatch_udf(stream_df['dictionary_classes']))
 
-        self.stream = stream_df
+        self.stream = stream_df.persist(StorageLevel.MEMORY_AND_DISK)
         return self
 
     def export_dataset(self):
