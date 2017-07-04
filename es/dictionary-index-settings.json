@@ -4,6 +4,138 @@
     "index": {
       "number_of_shards": "3",
       "number_of_replicas": "1"
+    },
+    "analysis": {
+      "filter": {
+        "en_stop_filter": {
+          "type": "stop",
+          "stopwords": "_english_"
+        },
+        "id_stop_filter": {
+          "type": "stop",
+          "stopwords": "_indonesian_"
+        },
+        "nl_stop_filter": {
+          "type": "stop",
+          "stopwords": "_dutch_"
+        },
+        "en_stemmer": {
+          "type": "stemmer",
+          "name": "english"
+        },
+        "id_stemmer": {
+          "type": "stemmer",
+          "name": "indonesian"
+        },
+        "nl_stemmer": {
+          "type": "stemmer",
+          "name": "dutch"
+        }
+      },
+      "analyzer": {
+        "dictionary_en_analyzer": {
+          "type": "custom",
+          "tokenizer": "keyword",
+          "filter": [
+            "lowercase",
+            "en_stop_filter",
+            "kstem",
+            "asciifolding"
+          ]
+        },
+        "dictionary_id_analyzer": {
+          "type": "custom",
+          "tokenizer": "keyword",
+          "filter": [
+            "lowercase",
+            "id_stop_filter",
+            "id_stemmer",
+            "asciifolding"
+          ]
+        },
+        "dictionary_nl_analyzer": {
+          "type": "custom",
+          "tokenizer": "keyword",
+          "filter": [
+            "lowercase",
+            "nl_stop_filter",
+            "nl_stemmer",
+            "asciifolding"
+          ]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "_default_": {
+      "_all": {
+        "enabled": true
+      },
+      "properties": {
+        "term_expanded_conceptnet_from": {
+          "type": "string",
+          "index": "not_analyzed"
+        },
+        "term_expanded_conceptnet_hop": {
+          "type": "long"
+        },
+        "term_expanded_conceptnet_relationship": {
+          "type": "string",
+          "index": "not_analyzed"
+        },
+        "term_expanded_conceptnet_num": {
+          "type": "long"
+        },
+        "term_expanded_conceptnet_concept": {
+          "type": "string",
+          "index": "not_analyzed"
+        },
+        "term_words": {
+          "type": "string",
+          "index": "not_analyzed"
+        },
+        "term_words_num": {
+          "type": "long",
+          "index": "not_analyzed"
+        },
+        "term_expanded_conceptnet_weight": {
+          "type": "double"
+        },
+        "language": {
+          "type": "string",
+          "index": "not_analyzed"
+        },
+        "term": {
+          "type": "string",
+          "fields": {
+            "en": {
+              "type": "string",
+              "analyzer": "dictionary_en_analyzer"
+            },
+            "id": {
+              "type": "string",
+              "analyzer": "dictionary_id_analyzer"
+            },
+            "nl": {
+              "type": "string",
+              "analyzer": "dictionary_nl_analyzer"
+            }
+          }
+          
+        },
+        "source": {
+          "type": "string",
+          "index": "not_analyzed"
+        },
+        "class": {
+          "type": "string",
+          "index": "not_analyzed"
+        },
+        "term_sense": {
+          "type": "string",
+          "index": "not_analyzed"
+        }
+      }
     }
   }
 }

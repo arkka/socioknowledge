@@ -10,10 +10,6 @@ class Study(object):
         print "Study: " + id
         self.id = id
 
-        # Bucket
-        if os.environ.get('SE_BUCKET_URL') is not None:
-            bucket_url = os.environ.get('SE_BUCKET_URL')
-
         self.bucket_url = bucket_url
         print "Bucket URL: " + bucket_url
         self.bucket_dataset_url = bucket_url + 'datasets/'
@@ -40,7 +36,7 @@ class Study(object):
         if os.environ.get('ES_HOST') is not None:
             self.es_host = os.environ.get('ES_HOST')
 
-        self.es_port = 9200
+        self.es_port = "9200"
         if os.environ.get('ES_PORT') is not None:
             self.es_port = os.environ.get('ES_PORT')
 

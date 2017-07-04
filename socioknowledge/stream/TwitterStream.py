@@ -3,20 +3,20 @@ import json
 from Stream import Stream
 
 class TwitterStream(Stream):
-    def __init__(self, study):
+    def __init__(self, study, name="twitter-stream"):
         super(TwitterStream, self).__init__(study)
         self.study = study
-        self.stream = None
-        self.dictionaryName = "stream"
-        self.dictionaryIndexName = "/".join([self.study.id + "-streams", "stream"])
+        self.df = None
+        self.name = name
+        self.index_name = "/".join([self.study.id + "-streams", "stream"])
 
-    def load_from_mongo(self, collection='tweets', query='{}', limit=0, skip=0):
+    def import_mongo(self, collection='tweets', query='{}', limit=0, skip=0):
         tweetStreamsRDD = self.study.sc.newAPIHadoopRDD(
             inputFormatClass='com.mongodb.hadoop.MongoInputFormat',
             keyClass='org.apache.hadoop.io.Text',
             valueClass='org.apache.hadoop.io.MapWritable',
             conf={
-                'mongo.input.uri': self.study.mongoURL + '.' + collection,
+                'mongo.input.uri': self.study.mongo_url + '.' + collection,
                 'mongo.input.query': query,
                 'mongo.input.limit': str(limit),
                 'mongo.input.skip': str(skip)
@@ -27,24 +27,22 @@ class TwitterStream(Stream):
             key, val = tweet
 
             provider = "twitter"
+            text = val['text'].replace('\r', '').replace('\n', '')
             stream = {
                 'id': "-".join([provider, val['id_str']]),
                 'provider': provider,
                 'timestamp': int(val['timestamp_ms']),
-                'text': val['text'].replace('\r', '').replace('\n', ''),
+                'text': text,
                 'link': "/".join(['https://twitter.com', val['user']['id_str'], 'status', val['id_str']]),
                 'actor_id': "-".join([provider, val['user']['id_str']]),
                 'actor_name': val['user']['name'],
                 'actor_link': "/".join(['https://twitter.com', val['user']['id_str']]),
+                'text_raw': text
                 # 'data': json.dumps(val)
             }
 
             if val.get('lang', None) is not None:
                 stream['language'] = val['lang']
-
-            # twitter indonesian language code fix
-            if stream['language'] == 'in':
-                stream['language'] = 'id'
 
             if val.get('coordinates', None) is not None and val['coordinates'].get('type', None) is 'Point' and val[
                 'coordinates'].get('coordinates', None) is not None:
@@ -68,5 +66,5 @@ class TwitterStream(Stream):
         tweetStreamsRDD = tweetStreamsRDD.map(extractStream)
 
         df = self.study.sqlc.createDataFrame(tweetStreamsRDD, self.schema)
-        self.stream = df
+        self.df = df.cache()
         return self

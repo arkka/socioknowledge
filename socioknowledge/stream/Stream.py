@@ -1,7 +1,8 @@
 import json
 import re
 
-from pyspark.sql.functions import col, udf, lit, array, struct, create_map, split, explode
+from pyspark import StorageLevel
+from pyspark.sql.functions import col, udf, lit, array, struct, create_map, split, explode, size, length
 from pyspark.sql.types import ArrayType, StructType, StructField, DoubleType, IntegerType, LongType, StringType, \
     DateType, DataType, BooleanType
 from pyspark.ml.feature import HashingTF, IDF, Tokenizer, StopWordsRemover, PCA
@@ -14,7 +15,6 @@ from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
 from sklearn.metrics import jaccard_similarity_score
 
 from ..dataset import Dataset
-
 
 class Stream(object):
     # schemas
@@ -45,60 +45,82 @@ class Stream(object):
         StructField("place_latitude", DoubleType()),
         StructField("place_longitude", DoubleType()),
 
+        StructField("text_raw", StringType()),
+        
         # external legacy
-        StructField("data", StringType())
+        StructField("data", StringType()),
+
+        # computed field
+        StructField("text_tokens", ArrayType(StringType())),
+        StructField("text_tokens_num", IntegerType()),
+        StructField("text_length", IntegerType()),
+
+        StructField("dictionary_classes", ArrayType(StringType())),
+
     ])
 
-    def __init__(self, study):
+    def __init__(self, study, name="stream"):
         self.study = study
-        self.stream = None
-        self.stream_name = "stream"
-        self.stream_index_name = "/".join([self.study.id + "-streams", "stream"])
+        self.df = None
+        self.name = name
+        self.index_name = "/".join([self.study.id + "-streams", "stream"])
 
-        self.stream = self.study.sqlc.createDataFrame(study.sc.emptyRDD(), self.schema)
+        self.df = self.study.sqlc.createDataFrame(study.sc.emptyRDD(), self.schema)
 
-    def count(self):
-        return self.stream.count()
-
-    def head(self, num=1):
-        return self.stream.head(num)
-
-    def show(self):
-        return self.stream.show()
 
     def concat(self, stream):
-        self.stream = self.stream.unionAll(stream.stream)
+        self.df = self.df.unionAll(stream.df)
         return self
 
-    def load_stopwords(self):
+    def cache(self):
+        self.df = self.df.cache()
+        return self
+
+    def import_csv(self, file_name=None):
+        if file_name is None:
+            file_name = self.name + ".csv"
+            print "No file name specified to load stream. Using default file: " + self.study.bucket_study_url + file_name
+
+        df = self.study.sqlc.read.csv(
+            self.study.bucket_study_url + file_name, header=True, mode="PERMISSIVE", schema=self.schema
+        )
+
+        # tokens_string_udf = udf(lambda tokens: tokens.split('|') if tokens is not None else [], ArrayType(StringType()))
+        # df = df.withColumn('text_tokens', tokens_string_udf(df.text_tokens))
+        # df = df.withColumn('text_raw', df['text'])
+        self.df = df.cache()
+
+        return self
+
+    def load_stopwords(self,languages=['en','id','nl']):
         schema = StructType([StructField("term", StringType())])
-        en = self.study.sqlc.read.csv(self.study.bucket_dataset_url + "stopwords/stopwords-en.csv", header=False,
-                                      schema=schema)
-        id = self.study.sqlc.read.csv(self.study.bucket_dataset_url + "stopwords/stopwords-id.csv", header=False,
-                                      schema=schema)
-        nl = self.study.sqlc.read.csv(self.study.bucket_dataset_url + "stopwords/stopwords-nl.csv", header=False,
-                                      schema=schema)
-        stopwords = en.unionAll(id).unionAll(nl)
-        self.stopwords = stopwords.rdd.map(lambda row: row.asDict()['term']).collect()
+
+
+        self.stopwords = self.study.sqlc.createDataFrame(self.study.sc.emptyRDD(), schema)
+
+        for language in languages:
+            self.stopwords = self.stopwords.unionAll(self.study.sqlc.read.csv(self.study.bucket_dataset_url + "stopwords/stopwords-" + language + ".csv", header=False, schema=schema))
+
+        self.stopwords = self.stopwords.rdd.map(lambda row: row.asDict()['term']).cache()
         return self
 
-    def tokenize(self, input_col='text'):
-        df = self.stream
+    def tokenize(self, input_col='text_raw'):
+        df = self.df
 
-        # lower
-        lower_udf = udf(lambda term: unidecode(term.lower()), StringType())
-        if input_col is not 'text_tokenized':
-            df = df.withColumn("text_tokenized", lower_udf(df[input_col]))
+        if input_col is not 'text':
+            # lower
+            lower_udf = udf(lambda text: unidecode(text.lower()) if text is not None else "", StringType())
+            df = df.withColumn("text", lower_udf(df[input_col]))
 
-        tokenizer = Tokenizer(inputCol="text_tokenized", outputCol="text_tokens")
+        tokenizer = Tokenizer(inputCol="text", outputCol="text_tokens")
         df = df.drop('text_tokens', 'text_tokens_num')
         df = tokenizer.transform(df)
 
-        self.stream = df
+        self.df = df
         self.extract_tokens_stats()
         return self
 
-    def filter_standard(self, min_token_length=3):
+    def filter_standard(self, min_text_length=10, min_token_length=3):
         def filter_standard(tokens):
             filtered_tokens = []
             for token in tokens:
@@ -111,22 +133,27 @@ class Stream(object):
 
             return filtered_tokens
 
-        df = self.stream
+        df = self.df
 
+        # filter min text
+        df = df.filter(length(col("text")) > min_text_length)
+
+
+        # filter valid token
         filter_standard_udf = udf(lambda tokens: filter_standard(tokens), ArrayType(StringType()))
         df = df.withColumn("text_tokens", filter_standard_udf(df.text_tokens))
 
-        self.stream = df
+        self.df = df
         self.extract_tokens_stats()
         return self
 
-    def filter_stopwords(self, stopwords=None):
-        df = self.stream
+    def filter_stopwords(self, stopwords=None, languages=['en','id','nl']):
+        df = self.df
 
         # load default stop words
         if stopwords is None:
-            self.load_stopwords()
-            stopwords = self.stopwords
+            self.load_stopwords(languages=['en','id','nl'])
+            stopwords = self.stopwords.collect()
 
         join_words = udf(lambda words: " ".join(words), StringType())
         remover = StopWordsRemover(inputCol="text_tokens", outputCol="text_tokens_filtered", stopWords=stopwords)
@@ -134,16 +161,16 @@ class Stream(object):
         df = df.drop('text_tokens_filtered')
         df = remover.transform(df)
         df = df.withColumn("text_tokens", df.text_tokens_filtered)
-        df = df.withColumn("text_tokenized", join_words(df.text_tokens_filtered))
+        df = df.withColumn("text", join_words(df.text_tokens_filtered))
         df = df.drop('text_tokens_filtered')
 
-        self.stream = df
+        self.df = df
 
         self.extract_tokens_stats()
         return self
 
     def filter_shingle(self, max_n=2):
-        df = self.stream
+        df = self.df
 
         # generate shingle
         def generate_shingles(tokens, max_n):
@@ -162,17 +189,17 @@ class Stream(object):
         generate_shingles_udf = udf(lambda tokens, max_n: generate_shingles(tokens, max_n), ArrayType(StringType()))
         df = df.withColumn("text_tokens", generate_shingles_udf(df.text_tokens, lit(max_n)))
 
-        self.stream = df
+        self.df = df
 
         self.extract_tokens_stats()
         return self
 
-    def filter_stemming(self, valid_language=['en', 'nl', 'id', 'ms']):
-        df = self.stream
+    def filter_stemming(self, languages=['en', 'nl', 'id', 'ms']):
+        df = self.df
 
         # filter stemming
-        def stem(language, words):
-            if language in ['en', 'nl', 'id', 'ms']:
+        def stem(language, languages, words):
+            if language in languages:
                 stemmer = {
                     'en': SnowballStemmer("english"),
                     'nl': SnowballStemmer("dutch"),
@@ -187,31 +214,31 @@ class Stream(object):
                     pass
             return words
 
-        stem_words_udf = udf(lambda language, words: stem(language, words), ArrayType(StringType()))
-        df = df.withColumn("text_tokens", stem_words_udf(df.language, df.text_tokens))
+        stem_words_udf = udf(lambda language, languages, words: stem(language, languages, words), ArrayType(StringType()))
+        df = df.withColumn("text_tokens", stem_words_udf(df.language, array([lit(l) for l in languages]), df.text_tokens))
 
         # compute tokens
         join_words_udf = udf(lambda words: " ".join(words), StringType())
 
-        df = df.withColumn("text_tokenized", join_words_udf(df.text_tokens))
+        df = df.withColumn("text", join_words_udf(df.text_tokens))
 
-        self.stream = df
+        self.df = df
 
         self.extract_tokens_stats()
         return self
 
     def extract_tokens_stats(self):
-        df = self.stream
+        df = self.df
 
         count_udf = udf(lambda words: len(words), IntegerType())
         df = df.withColumn("text_tokens_num", count_udf(col("text_tokens")))
-        df = df.withColumn("text_tokenized_length", count_udf(col("text_tokenized")))
+        df = df.withColumn("text_length", count_udf(col("text")))
 
-        self.stream = df
+        self.df = df
         return self
 
     def export_hdfs(self, file_name='streams.csv'):
-        df = self.stream
+        df = self.df
 
         df.write \
             .format("com.databricks.spark.csv") \
@@ -220,7 +247,7 @@ class Stream(object):
         return self
 
     def export_csv(self, file_name='streams.csv'):
-        df = self.stream
+        df = self.df
 
         df.repartition(1)\
             .write \
@@ -230,15 +257,98 @@ class Stream(object):
 
         return self
 
-    def export_es(self, indexName=None):
-        if indexName is None:
-            indexName = self.streamIndexName
+    def match_dictionary(self, dictionary, partial_match_min_prefix=4, partial_match_min_similarity=0.75):
+        stream_rdd = self.df.rdd.map(lambda row: row.asDict()).repartition(4).cache()
+        dictionary_rdd = self.study.sc.parallelize([{ k: v for d in dictionary.compiled.rdd.map(lambda row: {row['class']:row['terms']}).collect() for k, v in d.items() }]).cache()
+
+        stream_dictionary_rdd = stream_rdd.cartesian(dictionary_rdd)
+
+        def match(stream, dictionary):
+            stream_matches = []
+            stream_exact_matches = []
+            stream_partial_matches = []
+            
+            tokens = stream['text_tokens']
+ 
+            for key, terms in dictionary.iteritems():
+                # exact match
+                exact_matches = list(set(tokens) & set(terms))
+                # stream['dictionary_' + key + '_exact_matches'] = exact_matches
+                # stream['dictionary_' + key + '_exact_matches_num'] = len(exact_matches)
+                # stream_exact_matches = stream_exact_matches + exact_matches
+                
+                # partial match
+                partial_matches = []
+                for token in tokens:
+                    # minimun token length
+                    if len(token) > partial_match_min_prefix:
+                        for term in terms:
+                            term_chars = list(term)
+                            term_chars_num = len(term_chars)
+                            token_chars = list(token)
+                            token_chars_num = len(token_chars)
+
+                            if (term_chars_num > token_chars_num):
+                                [token_chars.append("") for i in range(0, term_chars_num - token_chars_num)]
+                            else:
+                                [term_chars.append("") for i in range(0, token_chars_num - term_chars_num)]
+
+                            similarity = float(jaccard_similarity_score(term_chars, token_chars))
+                            if similarity >= partial_match_min_similarity:
+                                partial_matches.append(term)    
+                                
+                # stream['dictionary_' + key + '_partial_matches'] = partial_matches
+                # stream['dictionary_' + key + '_partial_matches_num'] = len(partial_matches)
+                # stream_partial_matches = stream_partial_matches + partial_matches
+                
+                # label class        
+                if len(exact_matches) > 0 or len(partial_matches) > 0:
+                    stream_matches.append(key)
+
+            if len(stream_matches) == 0:
+                stream_matches.append('none')
+
+            stream['dictionary_classes'] = stream_matches
+
+            return stream
+        stream_dictionary_rdd = stream_dictionary_rdd.map(lambda (stream, dictionary): match(stream, dictionary))
+        stream_df = self.study.sqlc.createDataFrame(stream_dictionary_rdd, self.schema)
+        self.df = stream_df.persist(StorageLevel.MEMORY_AND_DISK)
+        return self
+
+    def export_dataset(self):
+        stream_df = self.df
+        # explode
+        dataset_df = stream_df.select(col("id"), explode(col("dictionary_classes")).alias("label"), col("text"), col("text_tokens").alias("tokens")).dropDuplicates()
+
+        dataset = Dataset(self.study, dataset_df)
+
+        return dataset
+
+    def export_csv(self, file_name=None, repartition=True):
+        if file_name is None:
+            file_name = self.name + ".csv"
+            print "No file name specified to export stream. Using default file: " + self.study.bucket_study_url + file_name
+
+        df = self.df #.select('id','provider','timestamp','text','language','link','actor_id','actor_name','actor_link','coordinate_latitude','coordinate_longitude','place_id','place_link','place_name','place_type','place_country','place_latitude','place_longitude')
+        
+        tokens_string_udf = udf(lambda tokens: "|".join(tokens), StringType())
+
+        df = df.withColumn('text_tokens', tokens_string_udf(df.text_tokens))
+        if repartition:
+            df = df.repartition(1)
+
+        df.write.format('com.databricks.spark.csv').mode('overwrite').option("header", "true").save(self.study.bucket_study_url + file_name)
+
+    def export_es(self):
+        index_name = self.index_name
 
         es_conf = {
-            "es.nodes": "http://" + self.study.esHost,
-            "es.port": "9200",
-            "es.resource": indexName,
-            "es.query": '{  "query": { "match_all": {} } }',
+            "es.nodes": "http://" + self.study.es_host,
+            "es.port": self.study.es_port,
+            "es.resource": index_name,
+            "es.input.json": "true",
+            "es.mapping.id": "id",
             "es.write.ignore_exception": "true",
             "es.read.ignore_exception": "true",
             "es.nodes.client.only": "false",
@@ -247,125 +357,19 @@ class Stream(object):
             "es.nodes.wan.only": "true"
         }
 
-        # delete index
-        #         self.study.es.indices.delete(index=self.streamIndexName.split("/")[0], ignore=[400, 404])
+        # delete existing index
+        self.study.es.indices.delete(index=index_name.split("/")[0], ignore=[400, 404])
 
         # create new index using given settings and mappings
-        with open('elasticsearch/stream-index-settings.json') as data_file:
-            indexSettings = json.load(data_file)
+        # with open('elasticsearch/dictionary-index-settings.json') as data_file:
+        #     index_settings = json.load(data_file)
 
-        self.study.es.indices.create(index=self.streamIndexName.split("/")[0], body=indexSettings)
+        # self.study.es.indices.create(index=index_name.split("/")[0], body=index_settings)
 
         # index data
-        self.stream.rdd.map(lambda row: (None, row.asDict(recursive=True))).saveAsNewAPIHadoopFile(
+        self.df.rdd.map(lambda row: (row.asDict()['id'], json.dumps(row.asDict()))).saveAsNewAPIHadoopFile(
             path='-',
             outputFormatClass="org.elasticsearch.hadoop.mr.EsOutputFormat",
             keyClass="org.apache.hadoop.io.NullWritable",
             valueClass="org.elasticsearch.hadoop.mr.LinkedMapWritable",
             conf=es_conf)
-
-    def match_dictionary(self, dictionary, partial_match_min_prefix=4, partial_match_min_similarity=0.75):
-        def exact_match(dictionary_terms, tokens):
-            return list(set(dictionary_terms) & set(tokens))
-
-        def partial_match(dictionary_terms, tokens, partial_match_min_prefix, partial_match_min_similarity):
-            partial_matches = []
-
-            for token in tokens:
-
-                # minimun token length
-                if len(token) > partial_match_min_prefix:
-                    for term in dictionary_terms:
-
-                        term_chars = list(term)
-                        term_chars_num = len(term_chars)
-
-                        token_chars = list(token)
-                        token_chars_num = len(token_chars)
-
-                        if (term_chars_num > token_chars_num):
-                            [token_chars.append("") for i in range(0, term_chars_num - token_chars_num)]
-                        else:
-                            [term_chars.append("") for i in range(0, token_chars_num - term_chars_num)]
-
-                        similarity = float(jaccard_similarity_score(term_chars, token_chars))
-                        if similarity >= partial_match_min_similarity:
-                            partial_matches.append(term)
-            return partial_matches
-
-        def merge_match(exact, partial):
-            matches = []
-            matches = matches + exact
-            matches = matches + partial
-            return list(set(matches))
-
-        def label_match(label, matches_num, c):
-            if matches_num > 0:
-                label.append(c)
-            return list(set(label))
-
-        def label_match(label, matches_num, c):
-            if matches_num > 0:
-                label.append(c)
-            return list(set(label))
-
-        def label_unmatch(matches):
-            if len(matches) == 0:
-                return ['none']
-            return matches
-
-
-        count_udf = udf(lambda tokens: len(tokens), IntegerType())
-        exact_match_udf = udf(exact_match, ArrayType(StringType()))
-        partial_match_udf = udf(partial_match, ArrayType(StringType()))
-        merge_match_udf = udf(merge_match, ArrayType(StringType()))
-        label_match_udf = udf(label_match, ArrayType(StringType()))
-        label_unmatch_udf = udf(label_unmatch, ArrayType(StringType()))
-
-        stream_df = self.stream.persist(StorageLevel.MEMORY_AND_DISK)
-        dictionary_df = dictionary.compiled.rdd.map(lambda row: row.asDict()).persist(StorageLevel.MEMORY_AND_DISK)
-
-        for d in dictionary_df.collect():
-            terms = array([lit(term) for term in d['terms']])
-            stream_df = stream_df.withColumn('dictionary_' + d['class'], terms)
-
-            # exact match
-            stream_df = stream_df.withColumn('dictionary_' + d['class'] + '_exact_matches',
-                                             exact_match_udf(terms, stream_df['text_tokens']))
-            stream_df = stream_df.withColumn('dictionary_' + d['class'] + '_exact_matches_num',
-                                             count_udf(stream_df['dictionary_' + d['class'] + '_exact_matches']))
-
-            # partial match
-            stream_df = stream_df.withColumn('dictionary_' + d['class'] + '_partial_matches',
-                                             partial_match_udf(terms, stream_df['text_tokens'],
-                                                               lit(partial_match_min_prefix),
-                                                               lit(partial_match_min_similarity)))
-            stream_df = stream_df.withColumn('dictionary_' + d['class'] + '_partial_matches_num',
-                                             count_udf(stream_df['dictionary_' + d['class'] + '_partial_matches']))
-
-            # total match
-            stream_df = stream_df.withColumn('dictionary_' + d['class'] + '_matches',
-                                             merge_match_udf(stream_df['dictionary_' + d['class'] + '_exact_matches'], stream_df[
-                                                 'dictionary_' + d['class'] + '_partial_matches']))
-            stream_df = stream_df.withColumn('dictionary_' + d['class'] + '_matches_num',
-                                             count_udf(stream_df['dictionary_' + d['class'] + '_matches']))
-
-            # match classes
-            if not 'dictionary_classes' in stream_df.columns:
-                stream_df = stream_df.withColumn('dictionary_classes', array())
-            stream_df = stream_df.withColumn('dictionary_classes', label_match_udf(stream_df['dictionary_classes'], stream_df['dictionary_' + d['class'] + '_matches_num'], lit(d['class'])))
-
-        stream_df = stream_df.withColumn('dictionary_classes', label_unmatch_udf(stream_df['dictionary_classes']))
-
-        self.stream = stream_df.persist(StorageLevel.MEMORY_AND_DISK)
-        return self
-
-    def export_dataset(self):
-        stream_df = self.stream
-        # explode
-        dataset_df = stream_df.select(col("id"), explode(col("dictionary_classes")).alias("class"), col("text_tokens").alias("tokens"))
-
-        dataset = Dataset(self.study, dataset_df)
-
-        return dataset
-

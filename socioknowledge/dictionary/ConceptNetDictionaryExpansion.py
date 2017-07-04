@@ -13,8 +13,8 @@ class ConceptNetDictionaryExpansion(DictionaryExpansion):
         StructField("term_sense", StringType()),
         StructField("language", StringType()),
         StructField("source", StringType()),
-        StructField("term_tokenized", StringType()),
-        StructField("term_tokenized_length", StringType()),
+        StructField("term_raw", StringType()),
+        StructField("term_length", StringType()),
         StructField("term_tokens", ArrayType(StringType())),
         StructField("term_tokens_num", IntegerType()),
         StructField("term_expanded_conceptnet_num", IntegerType()),
@@ -57,7 +57,6 @@ class ConceptNetDictionaryExpansion(DictionaryExpansion):
         '/r/PartOf',
         '/r/HasA',
         '/r/UsedFor',
-        '/r/CapableOf',
         '/r/AtLocation',
         '/r/Causes',
         '/r/HasSubEvent',
@@ -79,9 +78,10 @@ class ConceptNetDictionaryExpansion(DictionaryExpansion):
         '/r/dbpedia/product'
     ]
 
-    def __init__(self, dictionary, input_col="term", valid_min_weight=0.5, valid_languages=None, valid_relationships=None):
+    def __init__(self, dictionary, conceptnet_file='conceptnet.csv', input_col="term", valid_min_weight=1.0, valid_languages=None, valid_relationships=None):
         super(ConceptNetDictionaryExpansion, self).__init__(dictionary, input_col)
-        self.dictionary_name = self.dictionary_name + "-conceptnet"
+
+        self.name = self.name + "-conceptnet"
 
         if valid_min_weight is not None:
             self.valid_min_weight = valid_min_weight
@@ -90,14 +90,16 @@ class ConceptNetDictionaryExpansion(DictionaryExpansion):
         if valid_relationships is not None:
             self.valid_relationships = valid_relationships
 
-        # print "Valid minimum weight: " + str(self.valid_min_weight)
-        # print "Valid languages: " + str(self.valid_languages)
-        # print "Valid relationships: " + str(self.valid_relationships)
+        print "Valid minimum weight: " + str(self.valid_min_weight)
+        print "Valid languages: " + str(self.valid_languages)
+        print "Valid relationships: " + str(self.valid_relationships)
 
+        # load concept with valid relationships and languages
+        self.load_concepts(conceptnet_file)
 
     def load_concepts(self, file_name=None):
         if file_name is None:
-            file_name = "conceptnet.csv.gz"
+            file_name = "conceptnet.csv"
             print "No file name specified to load ConceptNet. Using default file: " + self.study.bucket_study_url + file_name
 
         df = self.study.sqlc.read.format("com.databricks.spark.csv") \
@@ -146,9 +148,9 @@ class ConceptNetDictionaryExpansion(DictionaryExpansion):
 
             return row
 
-        rdd = self.dictionary.rdd.map(parse_dictionary)
+        rdd = self.df.rdd.map(parse_dictionary)
         df = self.study.sqlc.createDataFrame(rdd, self.schema)
-        self.dictionary = df
+        self.df = df
         return self
 
     def extract_concept(self):
@@ -176,11 +178,14 @@ class ConceptNetDictionaryExpansion(DictionaryExpansion):
 
         def parse_weight(meta):
             weight = 1.0
-            try:
-                meta = json.loads(meta)
-                weight = float(meta['weight'])
-            except ValueError, e:
-                pass
+
+            if isinstance(meta, basestring):
+                try:
+                    meta = json.loads(meta)
+                    weight = float(meta['weight'])
+                except ValueError, e:
+                    pass
+
             return weight
 
         def parse_concept(concept):
@@ -201,11 +206,8 @@ class ConceptNetDictionaryExpansion(DictionaryExpansion):
         return self
 
     def expand(self):
-        # load concept with valid relationships and languages
-        self.load_concepts()
-
         input_col = self.input_col
-        seed = self.dictionary
+        seed = self.df
         concepts = self.concepts
 
         def generate_dictionary_senses(dictionary):
@@ -281,40 +283,30 @@ class ConceptNetDictionaryExpansion(DictionaryExpansion):
                 seed['term_expanded_conceptnet_num'] = 0
             return seed
         
-        # seed dictionary 
-        seed_rdd = seed.rdd.map(lambda row: row.asDict())
-        dictionary_rdd = seed_rdd
-        
-        # pre-process seed dictionary
-        seed_rdd = seed_rdd.flatMap(generate_dictionary_senses).map(lambda dictionary: preprocess_dictionary(dictionary, input_col)).persist(StorageLevel.MEMORY_AND_DISK)
-        
-        # pre-process dictionary
-        dictionary_rdd = dictionary_rdd.map(lambda dictionary: preprocess_dictionary(dictionary, input_col)).persist(StorageLevel.MEMORY_AND_DISK)
-        
-        # pre process concept
-        concept_rdd = concepts.rdd.map(lambda row: row.asDict()).map(preprocess_concept).persist(StorageLevel.MEMORY_AND_DISK)
-        
-        related_dictionary_rdd = seed_rdd \
-            .leftOuterJoin(concept_rdd) \
-            .map(lambda (k, v): extract_dictionary(v)) \
-            .filter(lambda x: x is not None) \
-            .groupBy(lambda x: x['term_expanded_conceptnet_from'])
-            
-        expanded_dictionary_rdd = dictionary_rdd \
-            .leftOuterJoin(related_dictionary_rdd) \
-            .map(lambda (k, (v, z)): extract_expanded_stats(v, z))
+        dictionary_rdd = seed.rdd.map(lambda row: row.asDict()).map(lambda dictionary: preprocess_dictionary(dictionary, input_col))
+        seed_rdd = seed.rdd.map(lambda row: row.asDict()).flatMap(generate_dictionary_senses).map(lambda dictionary: preprocess_dictionary(dictionary, input_col))
+        concept_rdd = concepts.rdd.map(lambda row: row.asDict()).map(preprocess_concept)
 
+        seed_concept_rdd = seed_rdd.leftOuterJoin(concept_rdd)
+        
+        related_dictionary_rdd = seed_concept_rdd.map(lambda (k, v): extract_dictionary(v)).filter(lambda x: x is not None)
+        related_dictionary_num_rdd = related_dictionary_rdd.groupBy(lambda x: x['term_expanded_conceptnet_from'])
+        expanded_dictionary_rdd = dictionary_rdd.leftOuterJoin(related_dictionary_num_rdd).map(lambda (k, (v, z)): extract_expanded_stats(v, z))
+        
         expanded_dictionary = self.study.sqlc.createDataFrame(expanded_dictionary_rdd, self.schema)
         related_dictionary = self.study.sqlc.createDataFrame(related_dictionary_rdd, self.schema)
-
+        
         # temporary hacks
-        self.dictionary = related_dictionary
-        self.tokenize()
-        related_dictionary = self.dictionary
-
-        self.dictionary = expanded_dictionary
-        self.tokenize(input_col="term_tokenized")
-        expanded_dictionary = self.dictionary
-
-        self.dictionary = expanded_dictionary.unionAll(related_dictionary).persist(StorageLevel.MEMORY_AND_DISK)
+        # self.df = related_dictionary
+        # self.tokenize()
+        # related_dictionary = self.df
+        
+        # self.df = expanded_dictionary
+        # self.tokenize(input_col="term")
+        # expanded_dictionary = self.df
+        
+        df = expanded_dictionary.unionAll(related_dictionary).dropDuplicates(['class', 'term'])
+        df = df.withColumn('term_raw', df['term'])
+        
+        self.df = df
         return self
